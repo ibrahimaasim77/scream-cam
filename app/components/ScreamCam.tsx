@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toPng } from "html-to-image";
+import { AudioVisualizer } from "./AudioVisualizer";
+import { computeScore } from "@/lib/score";
 
 type Phase = "idle" | "arming" | "recording" | "done" | "error";
 
@@ -15,6 +17,7 @@ export function ScreamCam() {
   const [name, setName] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
 
   const audioCtxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -28,6 +31,7 @@ export function ScreamCam() {
     streamRef.current = null;
     audioCtxRef.current?.close().catch(() => {});
     audioCtxRef.current = null;
+    setAnalyser(null);
   }, []);
 
   useEffect(() => cleanup, [cleanup]);
@@ -46,17 +50,19 @@ export function ScreamCam() {
       const ctx = new AudioContext();
       audioCtxRef.current = ctx;
       const source = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser();
-      analyser.fftSize = 2048;
-      source.connect(analyser);
+      const analyserNode = ctx.createAnalyser();
+      analyserNode.fftSize = 2048;
+      analyserNode.smoothingTimeConstant = 0.6;
+      source.connect(analyserNode);
+      setAnalyser(analyserNode);
 
-      const buf = new Float32Array(analyser.fftSize);
+      const buf = new Float32Array(analyserNode.fftSize);
       let peak = 0;
       const startedAt = performance.now();
       setPhase("recording");
 
       const tick = () => {
-        analyser.getFloatTimeDomainData(buf);
+        analyserNode.getFloatTimeDomainData(buf);
         let sumSq = 0;
         for (let i = 0; i < buf.length; i++) sumSq += buf[i] * buf[i];
         const rms = Math.sqrt(sumSq / buf.length);
@@ -65,7 +71,7 @@ export function ScreamCam() {
 
         const elapsed = performance.now() - startedAt;
         if (elapsed >= DURATION_MS) {
-          const final = Math.max(0, Math.min(100, Math.round(peak * 130)));
+          const final = computeScore(peak);
           setScore(final);
           setPhase("done");
           animateTo(final);
@@ -129,7 +135,7 @@ export function ScreamCam() {
   };
 
   return (
-    <div className="w-full max-w-md flex flex-col items-center gap-8">
+    <div className="w-full max-w-md flex flex-col items-center gap-6">
       <div className="relative w-64 h-64 sm:w-72 sm:h-72">
         <div
           className="absolute inset-0 rounded-full bg-gradient-to-br from-red-500 to-orange-500 blur-2xl transition-opacity duration-100"
@@ -150,6 +156,7 @@ export function ScreamCam() {
             <>
               <span className="text-2xl font-bold text-white">TAP TO SCREAM</span>
               <span className="text-sm text-zinc-400 mt-2">5 second window</span>
+              <span className="text-xs text-zinc-500 mt-3">90+ is rare. 100 is mythical.</span>
             </>
           )}
           {phase === "arming" && (
@@ -174,6 +181,15 @@ export function ScreamCam() {
             </>
           )}
         </button>
+      </div>
+
+      <div className="w-full">
+        <AudioVisualizer analyser={analyser} active={phase === "recording"} />
+        <div className="flex justify-between text-[10px] text-zinc-600 mt-1 px-1 uppercase tracking-widest">
+          <span>low</span>
+          <span>pitch</span>
+          <span>high</span>
+        </div>
       </div>
 
       {error && <p className="text-sm text-red-400">{error}</p>}
@@ -227,7 +243,7 @@ export function ScreamCam() {
           </div>
           <div className="text-5xl text-zinc-400 mt-8">/ 100</div>
           <div className="text-4xl mt-24 text-white font-bold">@{name.trim() || "anon"}</div>
-          <div className="text-3xl text-zinc-500 mt-24">beat me → screamcam.app</div>
+          <div className="text-3xl text-zinc-500 mt-24">beat me → scream-cam.vercel.app</div>
         </div>
       </div>
     </div>
