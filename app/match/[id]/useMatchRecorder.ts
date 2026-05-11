@@ -44,11 +44,18 @@ export function useMatchRecorder() {
       setSupported(false);
       return;
     }
+    // Prefer MP4 when the browser can record it natively (Safari, modern Chrome
+    // and Edge). Falls back to WebM otherwise (Firefox); the match arena will
+    // transcode WebM → MP4 client-side via ffmpeg.wasm so the final file the
+    // user downloads is always TikTok-compatible.
     const candidates = [
+      "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+      "video/mp4;codecs=avc1.4D401E,mp4a.40.2",
+      "video/mp4;codecs=h264,aac",
+      "video/mp4",
       "video/webm;codecs=vp9,opus",
       "video/webm;codecs=vp8,opus",
       "video/webm",
-      "video/mp4",
     ];
     const found = candidates.find((c) => MediaRecorder.isTypeSupported(c));
     if (!found) {

@@ -56,6 +56,12 @@ export function MatchArena({
   const [peerConnected, setPeerConnected] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [mp4Url, setMp4Url] = useState<string | null>(null);
+  const [mp4Status, setMp4Status] = useState<
+    "idle" | "converting" | "done" | "failed"
+  >("idle");
+  const [mp4Progress, setMp4Progress] = useState(0);
+  const conversionStartedRef = useRef(false);
 
   const recorder = useMatchRecorder();
 
@@ -480,6 +486,46 @@ export function MatchArena({
       ? match.calleeScore
       : match.callerScore
     : null;
+  // 14. When recorder produces a WebM blob, transcode to MP4 in the
+  // background via ffmpeg.wasm so the downloaded file is TikTok-compatible.
+  // Browsers that record MP4 natively skip this entirely.
+  useEffect(() => {
+    if (!recorder.blobUrl) return;
+    if (recorder.fileExtension !== "webm") return;
+    if (conversionStartedRef.current) return;
+    conversionStartedRef.current = true;
+    let cancelled = false;
+    setMp4Status("converting");
+    setMp4Progress(0);
+    (async () => {
+      try {
+        const resp = await fetch(recorder.blobUrl!);
+        const blob = await resp.blob();
+        const { convertWebmToMp4 } = await import("@/lib/convertToMp4");
+        const mp4Blob = await convertWebmToMp4(blob, (r) => {
+          if (!cancelled) setMp4Progress(r);
+        });
+        if (cancelled) return;
+        const url = URL.createObjectURL(mp4Blob);
+        setMp4Url(url);
+        setMp4Status("done");
+      } catch (e) {
+        console.warn("mp4 conversion failed", e);
+        if (!cancelled) setMp4Status("failed");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [recorder.blobUrl, recorder.fileExtension]);
+
+  // 15. Revoke MP4 object URL on unmount or replacement.
+  useEffect(() => {
+    return () => {
+      if (mp4Url) URL.revokeObjectURL(mp4Url);
+    };
+  }, [mp4Url]);
+
   useEffect(() => {
     recorder.updateOverlay({
       phase:
@@ -633,6 +679,9 @@ export function MatchArena({
             clipExt={recorder.fileExtension}
             recorderSupported={recorder.supported}
             isStillRecording={recorder.isRecording}
+            mp4Url={mp4Url}
+            mp4Status={mp4Status}
+            mp4Progress={mp4Progress}
           />
         )}
 
@@ -715,6 +764,9 @@ function ResultsPanel({
   clipExt,
   recorderSupported,
   isStillRecording,
+  mp4Url,
+  mp4Status,
+  mp4Progress,
 }: {
   match: MatchState;
   role: Role;
@@ -722,13 +774,18 @@ function ResultsPanel({
   clipExt: string;
   recorderSupported: boolean | null;
   isStillRecording: boolean;
+  mp4Url: string | null;
+  mp4Status: "idle" | "converting" | "done" | "failed";
+  mp4Progress: number;
 }) {
   const myScore = role === "caller" ? match.callerScore : match.calleeScore;
   const theirScore = role === "caller" ? match.calleeScore : match.callerScore;
   if (myScore == null || theirScore == null) return null;
   const won = myScore > theirScore;
   const tied = myScore === theirScore;
-  const filename = `screamcam-${myScore}vs${theirScore}.${clipExt}`;
+  const nativeName = `screamcam-${myScore}vs${theirScore}.${clipExt}`;
+  const mp4Name = `screamcam-${myScore}vs${theirScore}.mp4`;
+  const recordedNative = clipExt === "mp4";
   return (
     <div className="flex flex-col items-center gap-3">
       <div
@@ -746,13 +803,62 @@ function ResultsPanel({
         <div className="text-xs text-zinc-600 mt-1">
           (clip recording not supported in this browser)
         </div>
-      ) : clipUrl ? (
+      ) : recordedNative && clipUrl ? (
+        // Native MP4 — single button.
         <a
           href={clipUrl}
-          download={filename}
+          download={nativeName}
           className="mt-2 px-5 py-3 rounded-lg bg-white text-black font-black hover:bg-zinc-200"
         >
-          ⬇ Download clip
+          ⬇ Download MP4
+        </a>
+      ) : mp4Status === "done" && mp4Url ? (
+        // Transcoded MP4 ready.
+        <div className="flex flex-col items-center gap-2">
+          <a
+            href={mp4Url}
+            download={mp4Name}
+            className="px-5 py-3 rounded-lg bg-white text-black font-black hover:bg-zinc-200"
+          >
+            ⬇ Download MP4 <span className="text-xs text-zinc-500">(TikTok-ready)</span>
+          </a>
+          {clipUrl && (
+            <a
+              href={clipUrl}
+              download={nativeName}
+              className="text-[10px] text-zinc-500 hover:text-white underline"
+            >
+              or download original .webm
+            </a>
+          )}
+        </div>
+      ) : mp4Status === "converting" && clipUrl ? (
+        <div className="flex flex-col items-center gap-2 mt-2">
+          <div className="px-5 py-3 rounded-lg bg-zinc-800 text-zinc-300 font-bold text-sm">
+            Rendering MP4… {Math.round(mp4Progress * 100)}%
+          </div>
+          <div className="w-48 h-1 bg-zinc-900 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-red-500 transition-all"
+              style={{ width: `${Math.max(2, mp4Progress * 100)}%` }}
+            />
+          </div>
+          <a
+            href={clipUrl}
+            download={nativeName}
+            className="text-[10px] text-zinc-500 hover:text-white underline"
+          >
+            don&apos;t wait — download original .webm now
+          </a>
+        </div>
+      ) : mp4Status === "failed" && clipUrl ? (
+        // Transcode failed, original still works.
+        <a
+          href={clipUrl}
+          download={nativeName}
+          className="mt-2 px-5 py-3 rounded-lg bg-white text-black font-black hover:bg-zinc-200"
+        >
+          ⬇ Download clip (.{clipExt})
         </a>
       ) : isStillRecording ? (
         <div className="text-xs text-zinc-500 mt-1 animate-pulse">
@@ -775,9 +881,10 @@ function ResultsPanel({
         </Link>
       </div>
 
-      {clipUrl && (
+      {(mp4Url || (recordedNative && clipUrl)) && (
         <p className="text-[10px] text-zinc-600 mt-1 max-w-xs text-center">
-          Tip: post to TikTok or send to a friend. The clip auto-tags scream-cam.vercel.app so they know where to come.
+          Post to TikTok or send to a friend. The clip is watermarked
+          scream-cam.vercel.app so they know where to come.
         </p>
       )}
     </div>
