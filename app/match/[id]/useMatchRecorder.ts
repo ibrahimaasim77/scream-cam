@@ -75,6 +75,10 @@ export function useMatchRecorder() {
     try {
       const audioCtx = new AudioContext();
       audioCtxRef.current = audioCtx;
+      // Browsers ship AudioContexts in "suspended" — must resume or no audio.
+      if (audioCtx.state === "suspended") {
+        audioCtx.resume().catch(() => {});
+      }
       const dest = audioCtx.createMediaStreamDestination();
       audioDestRef.current = dest;
       if (opts.localStream.getAudioTracks().length > 0) {
@@ -232,6 +236,12 @@ export function useMatchRecorder() {
     if (!canvas || !dest) return;
     if (mediaRecorderRef.current?.state === "recording") return;
 
+    // Belt-and-suspenders: countdown comes after a user gesture (the caller
+    // hits START / the callee receives go) — perfect time to re-resume.
+    if (audioCtxRef.current?.state === "suspended") {
+      audioCtxRef.current.resume().catch(() => {});
+    }
+
     const videoStream = canvas.captureStream(30);
     const tracks: MediaStreamTrack[] = [];
     const v = videoStream.getVideoTracks()[0];
@@ -244,6 +254,7 @@ export function useMatchRecorder() {
       const mr = new MediaRecorder(combined, {
         mimeType: mimeTypeRef.current,
         videoBitsPerSecond: 2_500_000,
+        audioBitsPerSecond: 128_000,
       });
       mr.ondataavailable = (e) => {
         if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
