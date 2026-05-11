@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AudioVisualizer } from "@/app/components/AudioVisualizer";
 import { computeScore } from "@/lib/score";
+import { useMatchRecorder } from "./useMatchRecorder";
 
 type Role = "caller" | "callee";
 
@@ -53,6 +54,10 @@ export function MatchArena({
   const [analyser, setAnalyser] = useState<AnalyserNode | null>(null);
   const [countdown, setCountdown] = useState(COUNTDOWN_FROM);
   const [peerConnected, setPeerConnected] = useState(false);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+
+  const recorder = useMatchRecorder();
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -138,6 +143,7 @@ export function MatchArena({
         if (remoteVideoRef.current && stream) {
           remoteVideoRef.current.srcObject = stream;
         }
+        if (stream) setRemoteStream(stream);
       };
 
       pc.onconnectionstatechange = () => {
@@ -259,6 +265,7 @@ export function MatchArena({
         return;
       }
       localStreamRef.current = stream;
+      setLocalStream(stream);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
       }
@@ -427,6 +434,82 @@ export function MatchArena({
     window.dispatchEvent(new CustomEvent("scream:go"));
   };
 
+  // 11. Initialize recorder when both streams + video els are ready
+  useEffect(() => {
+    if (!localStream || !remoteStream) return;
+    const lv = localVideoRef.current;
+    const rv = remoteVideoRef.current;
+    if (!lv || !rv) return;
+    recorder.init({
+      localStream,
+      remoteStream,
+      localVideo: lv,
+      remoteVideo: rv,
+    });
+  }, [localStream, remoteStream, recorder]);
+
+  // 12. Start recording at countdown, stop a beat after results
+  useEffect(() => {
+    if (phase === "countdown" && !recorder.isRecording) {
+      recorder.start();
+    }
+    if (phase === "results") {
+      const t = setTimeout(() => recorder.stop(), 2500);
+      return () => clearTimeout(t);
+    }
+  }, [phase, recorder]);
+
+  // 13. Push overlay state into the recorder so it draws current HUD each frame
+  const myNameForOverlay = match
+    ? role === "caller"
+      ? match.caller.name
+      : match.callee.name
+    : "you";
+  const theirNameForOverlay = match
+    ? role === "caller"
+      ? match.callee.name
+      : match.caller.name
+    : "opponent";
+  const myScoreForOverlay = match
+    ? role === "caller"
+      ? match.callerScore
+      : match.calleeScore
+    : null;
+  const theirScoreForOverlay = match
+    ? role === "caller"
+      ? match.calleeScore
+      : match.callerScore
+    : null;
+  useEffect(() => {
+    recorder.updateOverlay({
+      phase:
+        phase === "countdown"
+          ? "countdown"
+          : phase === "scream"
+            ? "scream"
+            : phase === "submitted"
+              ? "submitted"
+              : phase === "results"
+                ? "results"
+                : phase === "ready"
+                  ? "ready"
+                  : "idle",
+      countdown,
+      myName: myNameForOverlay,
+      theirName: theirNameForOverlay,
+      myScore: myScoreForOverlay,
+      theirScore: theirScoreForOverlay,
+    });
+  }, [
+    phase,
+    countdown,
+    myNameForOverlay,
+    theirNameForOverlay,
+    myScoreForOverlay,
+    theirScoreForOverlay,
+    recorder,
+  ]);
+
   const me = match
     ? role === "caller"
       ? match.caller
@@ -543,7 +626,14 @@ export function MatchArena({
         )}
 
         {phase === "results" && match && (
-          <ResultsPanel match={match} role={role} />
+          <ResultsPanel
+            match={match}
+            role={role}
+            clipUrl={recorder.blobUrl}
+            clipExt={recorder.fileExtension}
+            recorderSupported={recorder.supported}
+            isStillRecording={recorder.isRecording}
+          />
         )}
 
         {phase === "error" && (
@@ -618,12 +708,27 @@ function Tile({
   );
 }
 
-function ResultsPanel({ match, role }: { match: MatchState; role: Role }) {
+function ResultsPanel({
+  match,
+  role,
+  clipUrl,
+  clipExt,
+  recorderSupported,
+  isStillRecording,
+}: {
+  match: MatchState;
+  role: Role;
+  clipUrl: string | null;
+  clipExt: string;
+  recorderSupported: boolean | null;
+  isStillRecording: boolean;
+}) {
   const myScore = role === "caller" ? match.callerScore : match.calleeScore;
   const theirScore = role === "caller" ? match.calleeScore : match.callerScore;
   if (myScore == null || theirScore == null) return null;
   const won = myScore > theirScore;
   const tied = myScore === theirScore;
+  const filename = `screamcam-${myScore}vs${theirScore}.${clipExt}`;
   return (
     <div className="flex flex-col items-center gap-3">
       <div
@@ -636,6 +741,25 @@ function ResultsPanel({ match, role }: { match: MatchState; role: Role }) {
       <div className="text-sm text-zinc-400">
         {myScore} vs {theirScore}
       </div>
+
+      {recorderSupported === false ? (
+        <div className="text-xs text-zinc-600 mt-1">
+          (clip recording not supported in this browser)
+        </div>
+      ) : clipUrl ? (
+        <a
+          href={clipUrl}
+          download={filename}
+          className="mt-2 px-5 py-3 rounded-lg bg-white text-black font-black hover:bg-zinc-200"
+        >
+          ⬇ Download clip
+        </a>
+      ) : isStillRecording ? (
+        <div className="text-xs text-zinc-500 mt-1 animate-pulse">
+          rendering clip…
+        </div>
+      ) : null}
+
       <div className="flex gap-2 mt-2">
         <Link
           href="/versus"
@@ -650,6 +774,12 @@ function ResultsPanel({ match, role }: { match: MatchState; role: Role }) {
           home
         </Link>
       </div>
+
+      {clipUrl && (
+        <p className="text-[10px] text-zinc-600 mt-1 max-w-xs text-center">
+          Tip: post to TikTok or send to a friend. The clip auto-tags scream-cam.vercel.app so they know where to come.
+        </p>
+      )}
     </div>
   );
 }
